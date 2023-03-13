@@ -92,3 +92,29 @@ int get_battery_charging_status(uint8_t *charging, uint8_t *vbus, uint8_t *attac
 
 	return status;
 }
+
+
+void battery_apply_filter(float *bv)
+{
+	static float s_filtered_capacity = -1;
+	static bool s_battery_is_charging = false;
+	bool battery_is_charging;
+
+	// If there has been a switch between charger and battery, reset the filter
+	battery_is_charging = is_battery_charging();
+	if (s_battery_is_charging != battery_is_charging) {
+		s_battery_is_charging = battery_is_charging;
+		s_filtered_capacity = -1;
+	}
+
+	if (s_filtered_capacity < 0) {
+		s_filtered_capacity = *bv;
+	}
+	*bv = s_filtered_capacity = s_filtered_capacity * 0.95 + (*bv) * 0.05;
+}
+
+uint8_t battery_millivolts_to_percent(uint32_t millivolts) {
+	float curBv = get_remaining_capacity((float) millivolts / 1000);
+	battery_apply_filter(&curBv);
+	return (uint8_t) (curBv + 0.5);
+} 	// Calculate input voltage in mV

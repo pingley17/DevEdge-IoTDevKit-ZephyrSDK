@@ -29,11 +29,11 @@
 #include <zephyr/net/net_event.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/drivers/bluetooth/rs9116w.h>
+#include <zephyr/drivers/adc/adc_gecko.h>
 
 #include "tmo_buzzer.h"
 #include "tmo_web_demo.h"
 #include "tmo_ble_demo.h"
-#include "tmo_adc.h"
 #include "tmo_gnss.h"
 #include "tmo_smp.h"
 #include "tmo_shell.h"
@@ -48,6 +48,7 @@ static inline void strupper(char *p) { while (*p) *p++ &= 0xdf;}
 
 extern struct bt_conn *get_acl_conn(int i);
 extern int get_active_le_conns();
+extern const struct device *battery_dev;
 
 K_SEM_DEFINE(update_sem, 0, 1);
 
@@ -191,27 +192,50 @@ static ssize_t battery_voltage_get(struct bt_conn *conn,
 				const struct bt_gatt_attr *attr, void *buf,
 				uint16_t len, uint16_t offset)
 {
-	uint8_t percent = 0;
-	uint32_t millivolts = 0;
+	struct adc_gecko_data  *data = battery_dev->data;
+	int32_t buffer;
 	uint8_t battery_attached = 0;
-	uint8_t charging = 0;
 	uint8_t vbus = 0;
+	uint8_t charging = 0;
 	uint8_t fault = 0;
+	uint8_t err;
+	uint8_t percent = 0;
+
+	struct adc_sequence seq = {
+		.buffer = &buffer,
+		.buffer_size = sizeof(buffer),
+		.resolution = 12
+	};
+
+	seq.channels = 0;
 
 	get_battery_charging_status(&charging, &vbus, &battery_attached, &fault);
 
-	/* flush the fault status out by reading again */
-	if (fault) {
-		get_battery_charging_status(&charging, &vbus, &battery_attached, &fault);
+	if (battery_attached != 0) {
+		err = adc_read(battery_dev, &seq);
+		if (err < 0)
+			return err;
 	}
-	/* there can be 2 of these to flush */
-	if (fault) {
-		get_battery_charging_status(&charging, &vbus, &battery_attached, &fault);
+	
+    /* flush the fault status out by reading again */
+    if (fault) {
+        get_battery_charging_status(&charging, &vbus, &battery_attached, &fault);
+        if (battery_attached != 0)
+			err = adc_read(battery_dev, &seq);
+		if (err < 0)
+			return err;
+    }
+    /* there can be 2 of these to flush */
+    if (fault) {
+        get_battery_charging_status(&charging, &vbus, &battery_attached, &fault);
+        if (battery_attached != 0)
+			err = adc_read(battery_dev, &seq);
+		if (err < 0)
+			return err;
+		uint32_t millivolts = (uint32_t)(3.0 * ((data->mVolts * 2500.0) / 4096.0) + 0.5);
+		percent = battery_millivolts_to_percent(millivolts);
 	}
 
-	millivolts = read_battery_voltage();
-	millivolts_to_percent(millivolts, &percent);
-	
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, (uint8_t*) &percent, 1);
 }
 
@@ -220,10 +244,13 @@ static ssize_t battery_power_source_get(struct bt_conn *conn,
                                 uint16_t len, uint16_t offset)
 {
 	uint8_t power_source;
-	uint8_t charging, vbus, battery_attached, fault;
+	uint8_t battery_attached = 0;
+	uint8_t fault = 0;
+	uint8_t vbus = 0;
+	uint8_t charging = 0;
 
 	get_battery_charging_status(&charging, &vbus, &battery_attached, &fault);
-	if (vbus) {
+	if (vbus || !battery_attached) {
 		power_source = ON_CHARGER_POWER;
 	} else {
 		power_source = ON_BATTERY_POWER;
@@ -797,8 +824,22 @@ void ble_notif_thread(void *a, void *b, void *c)
 	ARG_UNUSED(a);
 	ARG_UNUSED(b);
 	ARG_UNUSED(c);
+	struct adc_gecko_data *data = battery_dev->data;
 	uint8_t button_last_state = 0;
 	uint8_t battery_last_percent = 0;
+	int32_t buffer;
+	uint8_t battery_attached = 0;
+	uint8_t vbus = 0;
+	uint8_t charging = 0;
+	uint8_t fault = 0;
+	uint8_t percent = 0;
+	int err;
+
+	struct adc_sequence seq = {
+		.buffer = &buffer,
+		.buffer_size = sizeof(buffer),
+		.resolution = 12
+	};
 
 	while (1) {
 		if (!get_active_le_conns()) {
@@ -843,15 +884,21 @@ void ble_notif_thread(void *a, void *b, void *c)
 			ln_buf_gen();
 			bt_gatt_notify(NULL, &ln_svc.attrs[2], ln_las_buf, sizeof(ln_las_buf));
 		}
-		uint8_t charging, vbus, battery_attached, fault, percent;
-	
+
+		seq.channels = 0;
 		get_battery_charging_status(&charging, &vbus, &battery_attached, &fault);
-		uint32_t millivolts = read_battery_voltage();
-		millivolts_to_percent(millivolts, &percent);
-		if (battery_last_percent != percent) {
-			bt_gatt_notify(NULL, &bas.attrs[1], &percent, sizeof(percent));
+
+		if (battery_attached != 0) {
+			err = adc_read(battery_dev, &seq);
+			if (err < 0)
+				return;
+			uint32_t millivolts = (uint32_t)(3.0 * ((data->mVolts * 2500.0) / 4096.0) + 0.5);
+			percent = battery_millivolts_to_percent(millivolts);
+
+			if (battery_last_percent != percent)
+				bt_gatt_notify(NULL, &bas.attrs[1], &percent, sizeof(percent));
+			battery_last_percent = percent;
 		}
-		battery_last_percent = percent;
 	}
 }
 
