@@ -25,6 +25,8 @@
 #include "tmo_shell.h"
 #include "tmo_battery_ctrl.h"
 
+extern const struct adc_dt_spec adc_channels[];
+
 static struct web_demo_settings_t web_demo_settings = {false, 0, 2, TRANSMIT_INTERVAL_SECS_WEB};
 #define MAX_BASE_URL_SIZE  100
 #define MAX_PATH_SIZE      100
@@ -170,16 +172,17 @@ int  create_json()
 	struct sensor_value sensor_value_arr[3];
 	int buffer_size = MAX_PAYLOAD_BUFFER_SIZE;
 	memset(json_payload, 0, MAX_PAYLOAD_BUFFER_SIZE);
-	struct adc_gecko_data *data = battery_dev->data;
-	int32_t buffer;
+
 	uint8_t vbus;
 	uint8_t charging;
     uint8_t percent = 0;
 
-	struct adc_sequence seq = {
-		.buffer = &buffer,
-		.buffer_size = sizeof(buffer),
-		.resolution = 12
+	int16_t buf;
+	int32_t val_mv = 0;
+	struct adc_sequence sequence = {
+		.buffer = &buf,
+		/* buffer size in bytes, not number of samples */
+		.buffer_size = sizeof(buf),
 	};
 
 	// test blank payload
@@ -210,16 +213,28 @@ int  create_json()
 	total_bytes_written += ret_val;
 
 	if (ret_val >= 0 && total_bytes_written < buffer_size) {
-		uint32_t millivolts = 0;
 		enum battery_state e_bat_state = battery_state_not_attached;
 
         get_battery_charging_status(&charging, &vbus, &battery_attached, &fault);
 
 		if (battery_attached !=0) {
-			seq.channels = 0;
-			adc_read(battery_dev, &seq);
-			millivolts = (uint32_t)(3.0 * ((data->mVolts * 2500.0) / 4096.0) + 0.5);
-			percent = battery_millivolts_to_percent(millivolts);
+			(void)adc_sequence_init_dt(&adc_channels[0], &sequence);
+			ret_val = adc_read(adc_channels[0].dev, &sequence);
+			if (ret_val < 0) {
+				shell_error(shell,"Could not read (%d)\n", ret_val);
+				return ret_val;
+			}
+
+			val_mv = (int32_t)buf;
+			ret_val = adc_raw_to_millivolts_dt(&adc_channels[0],
+						       &val_mv);
+			/* conversion to mV may not be supported, skip if not */
+			if (ret_val < 0)  {
+				shell_print(shell," (value in mV not available)\n");
+				return ret_val;
+			}
+
+			percent = battery_millivolts_to_percent(val_mv);
 			if (vbus && charging) {
 				e_bat_state = battery_state_charging;
 			} else {
@@ -228,9 +243,9 @@ int  create_json()
 		} else {
 			e_bat_state = battery_state_not_attached;
 		}
-		ret_val = snprintf(json_payload+total_bytes_written, num_bytes_avail_buffer,
+		ret_val =snprintf(json_payload+total_bytes_written, num_bytes_avail_buffer,
 				"\"battery\":{\n\"voltage\":%d.%03d,\n\"percent\":%d,\n\"state\":\"%s\"\n},\n",
-				millivolts/1000, millivolts%1000, percent,
+				val_mv/1000, val_mv%1000, percent,
 				battery_state_string[e_bat_state]);
 	} else {
 		return ret_val;

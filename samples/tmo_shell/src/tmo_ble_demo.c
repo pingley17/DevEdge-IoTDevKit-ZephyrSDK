@@ -46,6 +46,7 @@
 static inline void strupper(char *p) { while (*p) *p++ &= 0xdf;}
 #define uuid128(...) BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(__VA_ARGS__))
 
+extern const struct adc_dt_spec adc_channels[];
 extern struct bt_conn *get_acl_conn(int i);
 extern int get_active_le_conns();
 extern const struct device *battery_dev;
@@ -192,48 +193,62 @@ static ssize_t battery_voltage_get(struct bt_conn *conn,
 				const struct bt_gatt_attr *attr, void *buf,
 				uint16_t len, uint16_t offset)
 {
-	struct adc_gecko_data  *data = battery_dev->data;
-	int32_t buffer;
 	uint8_t battery_attached = 0;
 	uint8_t vbus = 0;
 	uint8_t charging = 0;
 	uint8_t fault = 0;
 	uint8_t err;
 	uint8_t percent = 0;
+	int32_t val_mv;
 
-	struct adc_sequence seq = {
+	int16_t buffer;
+	struct adc_sequence sequence = {
 		.buffer = &buffer,
+		/* buffer size in bytes, not number of samples */
 		.buffer_size = sizeof(buffer),
-		.resolution = 12
 	};
-
-	seq.channels = 0;
 
 	get_battery_charging_status(&charging, &vbus, &battery_attached, &fault);
 
 	if (battery_attached != 0) {
-		err = adc_read(battery_dev, &seq);
-		if (err < 0)
+		(void)adc_sequence_init_dt(&adc_channels[0], &sequence);
+		err = adc_read(adc_channels[0].dev, &sequence);
+		if (err < 0) {
+			shell_error(shell,"Could not read (%d)\n", err);
 			return err;
+		}
 	}
 	
     /* flush the fault status out by reading again */
     if (fault) {
         get_battery_charging_status(&charging, &vbus, &battery_attached, &fault);
-        if (battery_attached != 0)
-			err = adc_read(battery_dev, &seq);
-		if (err < 0)
-			return err;
+        if (battery_attached != 0) {
+			(void)adc_sequence_init_dt(&adc_channels[0], &sequence);
+			err = adc_read(adc_channels[0].dev, &sequence);
+			if (err < 0) {
+				shell_error(shell,"Could not read (%d)\n", err);
+				return err;
+			}
+		}
+
     }
     /* there can be 2 of these to flush */
     if (fault) {
         get_battery_charging_status(&charging, &vbus, &battery_attached, &fault);
-        if (battery_attached != 0)
-			err = adc_read(battery_dev, &seq);
+      	if (battery_attached != 0) {
+			err = adc_read(adc_channels[0].dev, &sequence);
+			if (err < 0) {
+				shell_error(shell,"Could not read (%d)\n", err);
+				return err;
+			}
+		}
+		val_mv = (int32_t)buf;
+		err = adc_raw_to_millivolts_dt(&adc_channels[0], &val_mv);
+		/* conversion to mV may not be supported, skip if not */
 		if (err < 0)
-			return err;
-		uint32_t millivolts = (uint32_t)(3.0 * ((data->mVolts * 2500.0) / 4096.0) + 0.5);
-		percent = battery_millivolts_to_percent(millivolts);
+			shell_print(shell," (value in mV not available)\n");
+		else
+			percent = battery_millivolts_to_percent(val_mv);
 	}
 
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, (uint8_t*) &percent, 1);
@@ -824,23 +839,24 @@ void ble_notif_thread(void *a, void *b, void *c)
 	ARG_UNUSED(a);
 	ARG_UNUSED(b);
 	ARG_UNUSED(c);
-	struct adc_gecko_data *data = battery_dev->data;
-	uint8_t button_last_state = 0;
+
 	uint8_t battery_last_percent = 0;
-	int32_t buffer;
 	uint8_t battery_attached = 0;
 	uint8_t vbus = 0;
 	uint8_t charging = 0;
 	uint8_t fault = 0;
 	uint8_t percent = 0;
 	int err;
+	int32_t val_mv=0;
 
-	struct adc_sequence seq = {
-		.buffer = &buffer,
-		.buffer_size = sizeof(buffer),
-		.resolution = 12
+	int16_t buf;
+	struct adc_sequence sequence = {
+		.buffer = &buf,
+		/* buffer size in bytes, not number of samples */
+		.buffer_size = sizeof(buf),
 	};
 
+	uint8_t button_last_state = 0;
 	while (1) {
 		if (!get_active_le_conns()) {
 			k_sem_take(&ble_thd_sem, K_FOREVER);
@@ -885,15 +901,19 @@ void ble_notif_thread(void *a, void *b, void *c)
 			bt_gatt_notify(NULL, &ln_svc.attrs[2], ln_las_buf, sizeof(ln_las_buf));
 		}
 
-		seq.channels = 0;
 		get_battery_charging_status(&charging, &vbus, &battery_attached, &fault);
 
 		if (battery_attached != 0) {
-			err = adc_read(battery_dev, &seq);
+			(void)adc_sequence_init_dt(&adc_channels[0], &sequence);
+			err = adc_read(adc_channels[0].dev, &sequence);
 			if (err < 0)
-				return;
-			uint32_t millivolts = (uint32_t)(3.0 * ((data->mVolts * 2500.0) / 4096.0) + 0.5);
-			percent = battery_millivolts_to_percent(millivolts);
+				shell_error(shell,"Could not read (%d)\n", err);
+
+			val_mv = (int32_t)buf;
+			err = adc_raw_to_millivolts_dt(&adc_channels[0],
+								&val_mv);
+
+			percent = battery_millivolts_to_percent(val_mv);
 
 			if (battery_last_percent != percent)
 				bt_gatt_notify(NULL, &bas.attrs[1], &percent, sizeof(percent));
