@@ -2170,11 +2170,8 @@ int cmd_battery_voltage(const struct shell *shell, size_t argc, char **argv)
 		}
 
 		val_mv = (int32_t)buf;
-		printk("[tmo_shell] - val_mv1 %d\n", val_mv);
 		err = adc_raw_to_millivolts_dt(&adc_channels[0],
 						       &val_mv);
-		printk("[tmo_shell] - val_mv2 %d\n", val_mv);
-		printk("[tmo_shell] - buf %d\n", buf);
 		/* conversion to mV may not be supported, skip if not */
 		if (err < 0)
 			shell_print(shell," (value in mV not available)\n");
