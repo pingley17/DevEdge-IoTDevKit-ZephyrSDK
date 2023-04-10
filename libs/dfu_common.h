@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2023 T-Mobile USA, Inc.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #ifndef __DFU_COMMON_H__
 #define __DFU_COMMON_H__
 
